@@ -24,7 +24,7 @@ _Snap.BK_ does nothing else, but takes snapshot based on a set of predefined val
 ```bash
 git clone git@github.com:apinter/Snap.BK.git
 cd Snap.bk
-sudo install -D -p -m 0755 snapbk /usr/bin/snapbk
+sudo install -D -p -m 0555 snapbk /usr/bin/snapbk
 ```
 
 Once the script is installed you need to create the default configuration folder
@@ -77,3 +77,4 @@ Host btrfs-remote
 ```
 
 Since the script is running with `root` you probably want to store this in `/root/.ssh/config`.
+Once you're satisfied with the configuration, and can access the remote machine you can use the name you defined in `Host` in the _Snap.BK_ config for `SNB_SEND_SSH_REMOTE`.
