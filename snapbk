@@ -1,0 +1,238 @@
+#!/bin/bash
+
+set -e
+
+SNB_DEF_CONFIG_DIR=/etc/snapbk
+SNB_DEF_CONFIG=$SNB_DEF_CONFIG_DIR/config
+source $SNB_DEF_CONFIG
+SNAPSHOT_VOL="$STORE_LOC/$SNAPSHOT_PREFIX"
+STORE_CHECK=$(ls -t -w 1 $STORE_LOC | head -1)
+SNAPSHOT_EXISTS_CHECK=$(btrfs subvolume list -o $STORE_LOC | grep $SNAPSHOT_PREFIX | head -1 | awk '{print $9}' 2>/dev/null)
+
+backupNow() {
+echo "Starting backup process"
+
+## Check and mount if there is an external store defined
+
+if [ $SNB_SEND_DISK == true ] && [ $SNB_SEND_DISK_MOUNT == true ] && [ $SNB_SEND_DISK_MOUNT_ENC == false ]; then
+    echo "mount /dev/disk/by-label/$SNB_SEND_DISK_LABEL $SNB_SEND_DISK_PATH"
+elif [ $SNB_SEND_DISK == true ] && [ $SNB_SEND_DISK_MOUNT == true ] && [ $SNB_SEND_DISK_MOUNT_ENC == true ]; then
+    echo "cryptsetup luksOpen /dev/disk/by-label/$SNB_SEND_DISK_LABEL snapbk"
+    echo "mount /dev/disk/mapper/snapbk $SNB_SEND_DISK_PATH"
+else
+    echo "Skip mounting disk!"
+fi
+
+## Take the snapshot
+echo "checking existing snapshots"
+if [ $SNAPSHOT_EXISTS_CHECK ]; then
+    echo "Snapshot exists, skipping!"
+elif [ ! -d $STORE_LOC ]; then
+    btrfs subvolume create $STORE_LOC
+    btrfs subvolume snapshot -r $TO_SNAP $SNAPSHOT_VOL
+else
+    btrfs subvolume snapshot -r $TO_SNAP $SNAPSHOT_VOL
+fi
+
+## Send the snapshot
+if [ $SNB_SEND == true ]; then
+    echo "Preparing to send snapshot!"
+else
+    echo "Snapshot sending is not enabled, finished."
+fi
+
+SNAPSHOT_CHECK=$(ls -t -w 1 $STORE_LOC | head -2 | wc -l)
+
+if [ $SNB_SEND == true ] && [ $SNAPSHOT_CHECK -gt 1 ] && [ $SNB_SEND_DISK == true ]; then
+    sendToDiskIncremental
+elif [ $SNB_SEND == true ] && [ $SNAPSHOT_CHECK -le 1 ] && [ $SNB_SEND_DISK == true ]; then
+    sendToDisk
+fi
+
+if [ $SNB_SEND == true ] && [ $SNAPSHOT_CHECK -gt 1 ] && [ $SNB_SEND_SSH == true ]; then
+    sendToRemoteIncremental
+elif [ $SNB_SEND == true ] && [ $SNAPSHOT_CHECK -le 1 ] && [ $SNB_SEND_SSH == true ]; then
+    sendToRemote
+fi
+
+}
+
+sendToDisk() {
+    echo "Sending to disk $SNB_SEND_DISK_LABEL."
+    SNAP_VOL=$(ls -r $STORE_LOC -w 1 | head -n 1)
+    echo "btrfs send $STORE_LOC/$STORE_CHECK | btrfs receive $SNB_SEND_DISK_PATH"
+    echo "Finished sending to disk!"
+}
+
+sendToDiskIncremental() {
+    echo "Sending incrementally to disk."
+    SNAP_VOL1=$(ls -r $STORE_LOC -w 1 | head -n 2 | tac | head -n 1)
+    SNAP_VOL2=$(ls -r $STORE_LOC -w 1 | head -n 1)
+    echo btrfs send -p $STORE_LOC/$SNAP_VOL1 $STORE_LOC/$SNAP_VOL2 && echo "btrfs receive $SNB_SEND_DISK_PATH"
+    echo "Finished sending to disk!"
+}
+
+sendToRemote() {
+    echo "Sending to remote."
+    SNAP_VOL=$(ls -r $STORE_LOC -w 1 | head -n 1)
+    echo "btrfs send $STORE_LOC/$STORE_CHECK | btrfs receive $SNB_SEND_DISK_PATH"
+    echo "Finished sending to remote!"
+}
+
+sendToRemoteIncremental() {
+    echo "Sending to remote incrementally."
+    SNAP_VOL1=$(ls -r $STORE_LOC -w 1 | head -n 2 | tac | head -n 1)
+    SNAP_VOL2=$(ls -r $STORE_LOC -w 1 | head -n 1)
+    echo btrfs send -p $STORE_LOC/$SNAP_VOL1 $STORE_LOC/$SNAP_VOL2 && echo "ssh $SNB_SEND_SSH_REMOTE "btrfs receive $SNB_SEND_DISK_PATH""
+    echo "Finished sending to remote!"
+}
+
+cleanUp() {
+    echo soon
+}
+
+setup() {
+if [ -f $SNB_DEF_CONFIG ]; then
+    echo "Already configured! 
+To reconfigure you need to delete the existing configuration (Not recommended if you already using the tool)"
+else
+    echo "Preparing default configuration in /etc/snapnbackup/config
+You need to configure it to meet your requirements!"
+    mkdir $SNB_DEF_CONFIG_DIR
+    cat << EOF > $SNB_DEF_CONFIG
+## Define a name/prefix for all future snapshots. Avoid changing this is you already started to use the tool.
+SNAPSHOT_PREFIX=BACKUP-$(date +%m-%d-%Y)
+
+## Full path to store snapshots locally
+STORE_LOC=/home/.snapshot
+
+## Subvolume to create snapshot of. Defaults to /home.
+TO_SNAP=/home
+    
+## Send the snapshots or not.
+SNB_SEND_DISK=false
+
+## Enable btrfs send | receive to send the snapshot to a different disk or to a remote device via ssh
+SNB_SEND=false
+
+## Mount or not the disk you want to send snapshots to
+SNB_SEND_DISK_MOUNT=false
+
+## If you want to mount the disk, but it is encrypted set this and SNB_SEND_DISK_MOUNT to true
+SNB_SEND_DISK_MOUNT_ENC=false
+
+## Set the disk label if sending snapshots to a disk.
+SNB_SEND_DISK_LABEL=
+
+## If you set SNB_SEND_DISK to true you need to define the path the disk is mounted to. 
+SNB_SEND_DISK_PATH=
+
+## Send snapshot to remote server over ssh.
+SNB_SEND_SSH=false
+
+## Set the remote name to send to. Ideally for this to work seamlessly you set up and ssh config
+## with a key that is allowed to conenct to the server.
+SNB_SEND_SSH_REMOTE=
+
+## Path to store the received snapshot on the remote machine.
+SNB_SEND_SSH_PATH= 
+
+## Number of snapshots to keep locally. You want to keep at least the last snapshot to
+## continue storing backups incrementally.
+TO_KEEP_LOCAL=
+
+## Number of snapshots to keep locally. You want to keep at least the last snapshot to
+## continue storing backups incrementally.
+TO_KEEP_REMOTE=
+
+## If you generate systemd service and timer you can adjust this to set the OnCalendar
+## value. https://manpages.opensuse.org/Tumbleweed/systemd/systemd.timer.5.en.html
+SYSTEMD_TIMER_FREQ=daily
+
+EOF
+ 
+fi
+}
+
+setupSystemd() {
+    echo "Preparing systemd unit and timer in /etc/systemd/"
+    echo "Enable it with systemctl daemon-reload && systemctl enable --now snapbk.timer"
+    echo "========================================================================================"
+    echo "Note! If you're using an encrypted disk you need to make sure that the disk is mounted"
+    echo "or the service will fail as it can't unlock the disk."
+    echo "========================================================================================"
+
+    cat << EOF > snapbk.service
+[Unit]
+Description=Update user Flatpaks
+
+[Service]
+Type=oneshot
+ExecStart=/usr/bin/snapbk -c $SNB_DEF_CONFIG
+
+[Install]
+WantedBy=default.target
+EOF
+
+    cat << EOF > snapbk.timer
+[Unit]
+Description=Backup btrfs snapshots 
+
+[Timer]
+OnCalendar=$SYSTEMD_TIMER_FREQ
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+}
+
+showHelp() {
+    echo "Snap.BK
+    
+    Usage:
+
+    -h, --help              Show this message
+    -b, --backup            Start backup procedure
+    -s, --setup             Create initial configuration in /etc/snapnbackup/config
+    -c, --config            Path to configuration file to be used instead of the default created with --setup 
+    -g, --systemd-generate  Generate systemd unit and timer. Can pass OnCalendar value as argument (daily, weekly etc.)
+    -k, --systemd-custom    Generate systemd unit and timer. Can pass OnCalendar value and config path as argument (in that order)
+    
+    Example:
+
+    snapbk -g daily     ## Will generate a daily running timer using the default config path
+    snapbk -k daily /etc/snapbk/config.var  ## Will generate a daily running timer using a custom config 
+
+    Before using the tool you need to properly setup a configuration file under /etc/snapnbackup!
+    "
+}
+
+tester() {
+    echo $SNB_DEF_CONFIG
+}
+
+
+case "${1}" in
+	"")         
+                echo "Unsupported."; exit 1 ;;
+    -h|--help)
+                showHelp
+                exit 0
+                ;;
+    -b|--backup)
+                backupNow ;;
+    -s|--setup)
+                setup ;;
+    -g|--systemd-generate)
+                SYSTEMD_TIMER_FREQ=$2
+                setupSystemd ;;
+    -k|--systemd-custom)
+                SYSTEMD_TIMER_FREQ=$2
+                SNB_DEF_CONFIG=$3
+                setupSystemd ;;
+    -c|--config)
+                SNB_DEF_CONFIG=$2
+                backupNow ;;
+esac
