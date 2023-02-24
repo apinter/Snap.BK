@@ -87,8 +87,36 @@ sendToRemoteIncremental() {
     echo "Finished sending to remote!"
 }
 
-cleanUp() {
-    echo soon
+cleanUpLocal() {
+    cd $STORE_LOC
+    files=($(ls | sort))
+
+    if [ ${#files[@]} -gt $TO_KEEP_LOCAL ]; then
+      for ((i=${#files[@]}-1; i>=5; i--)); do
+        btrfs subvolume delete $STORE_LOC/"${files[i]}"
+      done
+    fi
+
+    echo "Remaining snapshots:"
+    ls
+
+}
+
+cleanUpRemote() {
+    ssh $SNB_SEND_SSH_REMOTE "bash -s" <<'ENDSCRIPT'
+    #!/bin/bash
+    cd $SNB_SEND_SSH_PATH
+    files=($(ls | sort))
+
+    if [ ${#files[@]} -gt $TO_KEEP_LOCAL ]; then
+      for ((i=${#files[@]}-1; i>=5; i--)); do
+        btrfs subvolume delete $SNB_SEND_SSH_PATH/"${files[i]}"
+      done
+    fi
+
+    echo "Remaining snapshots:"
+    ls
+ENDSCRIPT
 }
 
 setup() {
